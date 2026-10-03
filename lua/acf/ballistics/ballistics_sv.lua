@@ -277,10 +277,10 @@ function Ballistics.TestFilter(Entity, Bullet)
 	return true
 end
 
--- Every live, unfiltered mesh intersection the ACF-meshed entities along this flight segment present,
+-- Every live, unfiltered mesh intersection the ACF-meshed entities along Start -> EndPos present,
 -- gathered with a single ents.FindAlongRay. Unsorted; feed it to ACF.ResolveConvexStack.
-local function GatherMeshIntersections(Bullet, Start, Direction)
-	local TraceTo       = Bullet.TraceTo
+local function GatherMeshIntersections(Bullet, Start, Direction, EndPos)
+	local TraceTo       = EndPos or Bullet.TraceTo
 	local FoundEnts     = ents.FindAlongRay(Start, TraceTo) -- bounds discovery to this segment, same as the physics trace already covers
 	local MaxDist       = Start:Distance(TraceTo) -- and bounds the mesh rays to match, so convexes past the segment cost nothing
 	local Intersections = {}
@@ -346,6 +346,27 @@ do -- Obstacle resolution --------------------------
 		Projectile.PenIndex  = nil
 		Projectile.PenTrace  = nil
 		Projectile.ConvexHit = nil
+	end
+
+	-- Every live convex on Start -> End across all meshed entities, resolved as one stack so layers see neighbors
+	-- in other entities, then grouped per entity in hit order. Used by jets, which resolve armor entity by entity.
+	function Ballistics.GetEntityHits(Projectile, Start, End)
+		local Direction = (End - Start):GetNormalized()
+		local Stack     = ACF.ResolveConvexStack(GatherMeshIntersections(Projectile, Start, Direction, End), Direction)
+		local ByEntity  = {}
+
+		for _, Hit in ipairs(Stack) do
+			local List = ByEntity[Hit.Entity]
+
+			if not List then
+				List = {}
+				ByEntity[Hit.Entity] = List
+			end
+
+			List[#List + 1] = Hit
+		end
+
+		return ByEntity
 	end
 
 	-- The next live convex on the frozen ray with the penetration trace spliced onto it, or nil once the
@@ -539,12 +560,20 @@ do -- Terminal ballistics --------------------------
 		Bullet.TraceTo = Position + Flight * (DeltaTime * 2)
 	end
 
+	local RicochetHardness = 5 -- Degrees the ricochet center shifts per e-fold of face hardness over RHA, clamped to two e-folds
+
 	-- HitAngle (optional) overrides the angle derived from the physical trace; the per-convex impact
 	-- path passes the struck convex's entry angle so ricochets evaluate against the real convex face.
 	function Ballistics.CalculateRicochet(Bullet, Trace, HitAngle)
 		HitAngle = HitAngle or ACF.GetHitAngle(Trace, Bullet.Flight)
 		-- Ricochet distribution center
 		local sigmoidCenter = Bullet.DetonatorAngle or (Bullet.Ricochet - math.abs(Bullet.Speed / ACF.MeterToInch - Bullet.LimitVel) / 100)
+
+		-- Harder faces turn rounds away at shallower obliquity, soft ones grip them (Hazell 4.3.3)
+		local ConvexHit = Bullet.ConvexHit
+		if ConvexHit and not Bullet.DetonatorAngle then
+			sigmoidCenter = sigmoidCenter - RicochetHardness * math.Clamp(math.log(math.max(ConvexHit.ArmorType.Hardness, 0.01)), -2, 2)
+		end
 
 		-- Ricochet probability (sigmoid distribution); up to 5% minimal ricochet probability for projectiles with caliber < 20 mm
 		local ricoProb = math.Clamp(1 / (1 + math.exp((HitAngle - sigmoidCenter) / -4)), math.max(-0.05 * (Bullet.Caliber - 2) / 2, 0), 1)
@@ -646,119 +675,121 @@ do -- Terminal ballistics --------------------------
 		return false
 	end
 
-	-- Tuning constants for DoSpall; kept as locals (rather than ACF globals) so they can be edited and hot-reloaded from this file alone, without a full game restart.
-	local SpallFragFraction   = 0.01 -- Fraction of the spall energy budget that goes into forming countable fragments
-	local SpallEnergyFraction = 0.005 -- Fraction of the spall energy budget imparted to the ejected mass as kinetic energy
-	local SpallMinCone        = 30     -- Degrees, spall cone half angle with maximum overmatch (Loss near 0)
-	local SpallMaxCone        = 90    -- Degrees, spall cone half angle near the ballistic limit (Loss near 1)
-	local SpallAnglePower     = 2 -- Bias for angle sampling; higher packs more fragments near the cone axis
-	local SpallEnergyFalloff  = 2   -- Power of the cos(angle) energy falloff used to split speed across fragments
+	-- Spall tuning, kept as locals so this file hot-reloads on its own without a full restart.
+	local SpallMassFraction = 0.25 -- Share of the rear crater's mass thrown as fragments, before the material's SpallMul
+	local SpallCraterGrowth = 0.25 -- Rear crater radius growth per unit of plate thickness, past the bore radius
+	local SpallScabSpeed    = 0.25 -- Floor on core speed as a fraction of impact speed, near the limit a scab still flies off
+	local SpallEdgeSpeed    = 0.3  -- Speed of fragments at the cone's edge as a fraction of the core speed
+	local SpallMinCone      = 20   -- Degrees, cone half angle at heavy overmatch (Loss near 0)
+	local SpallMaxCone      = 60   -- Degrees, cone half angle near the ballistic limit (Loss near 1), Horsfall saw ~40
+	local SpallAnglePower   = 2    -- Higher packs more fragments near the cone axis
+	local SpallFragsPerMm   = 0.2  -- Traced fragments allowed per mm of bore, so small rounds stay cheap
+	local SpallMaxFragCount = 20   -- Hard cap on traced fragments per spall event
+	local SpallMinPen       = 0.5  -- mm, fragments that cannot beat this are not worth tracing
+	local SpallMinToughness = 0.5  -- MPa*m^0.5, floor so liquids still break into finite droplets
 
-	local SpallMinFragCount   = 1 -- Minimum number of fragments created; ensures at least one fragment is formed even with very low energy
-	local SpallMaxFragCount   = 20 -- Hard limit on the number of fragments created; prevents server overload from a single overmatch
-
+	-- Behind-armor debris from a perforated convex. A fast, heavy core follows the penetrator while lighter, slower
+	-- fragments fill the edge of the cone, so a liner narrows the cone but cannot stop its center.
 	function Ballistics.DoSpall(Bullet, Trace, HitRes, Speed, DmgInfo)
-		-- Only ever called during overpenetration
-		local Energy = Bullet.Energy.Kinetic -- Energy the projectile carries (kJ)
-
-		-- Spall is generated from the convex the bullet exited through; its material determines the removed mass and how readily it fragments
-		local RemovedMass
-		local Density
-		local SpallMul   = 1
-		local MeshData   = Trace.Entity.ACF_Volumetric_Mesh
 		local ConvexHits = DmgInfo and DmgInfo:GetConvexHits()
+		local LastHit    = ConvexHits and ConvexHits[#ConvexHits]
+		local Hit        = LastHit and LastHit.Source -- The convex the round exited through
+		if not Hit then return end -- Only meshed armor spalls
 
-		if MeshData and ConvexHits and #ConvexHits > 0 then
-			local ExitHit   = ConvexHits[#ConvexHits]
-			local Convex    = MeshData.Convexes[ExitHit.ConvexID]
-			local ArmorType = ArmorTypes.Get(Convex.Material) or ArmorTypes.Get("Default")
+		local Type    = Hit.ArmorType
+		local Area    = Bullet.DamageArea or Bullet.ProjArea -- cm^2
+		local Bore    = (Area / math.pi) ^ 0.5 -- cm, radius
+		local Caliber = Bore * 20 -- mm
+		local Release = ACF.GetSpallRelease(Hit, Caliber)
 
-			RemovedMass = ExitHit.Volume * ACF.InchToMCu * ArmorType.Density -- ExitHit.Volume is the actual penetration channel volume (in^3), Density is kg/m^3
-			Density     = ArmorType.Density * 1e-6 -- kg/m^3 to kg/cm^3, to match FragSize's cm-based units below
-			SpallMul    = ArmorType.SpallMul
-		else
-			RemovedMass = HitRes.Damage * ACF.RHADensity -- Damage is used as a proxy for volume (cm^3) and RHA density is in kg/cm^3
-			Density     = ACF.RHADensity
-		end
+		if Release <= 0 then return end -- Backed by a stiffer layer, the rear face is held in compression
 
-		if RemovedMass <= 0 then return end -- Nothing was actually removed, so there's no mass to turn into fragments
+		-- Mass comes from the rear crater, a cone widening from the bore through the last caliber or so of the plate.
+		local Thick   = Hit.GeoThick * 0.1 -- cm
+		local Radius  = Bore + SpallCraterGrowth * Thick
+		local Depth   = math.min(Thick, Bore * 2)
+		local Density = Type.Density * 1e-6 -- kg/cm^3
+		local Mass    = SpallMassFraction * Type.SpallMul * Release * Density * math.pi * Radius ^ 2 * Depth -- kg
 
-		-- Both the fragment count and the fragments' kinetic energy are drawn from the penetrator's kinetic energy, scaled by how readily this material spalls.
-		local SpallEnergy = Energy * SpallMul -- kJ
+		if Mass <= 0 then return end
 
-		local FragsFormed = SpallEnergy * SpallFragFraction
-		local FragCount = math.Clamp(math.floor(FragsFormed), SpallMinFragCount, SpallMaxFragCount) -- Atleast 1, up to 20 fragments (let's not kill the server)
+		-- Grady fragment size (Hazell Eq. 3.61): tough plates break into few heavy pieces, stiff or brittle ones into many fine ones.
+		local ImpactSpeed = Speed / ACF.Scale * ACF.InchToMeter -- m/s
+		local StrainRate  = math.max(ImpactSpeed, 1) / (Bore * 0.02) -- 1/s, impact speed over bore diameter
+		local Toughness   = math.max(Type.Toughness, SpallMinToughness) * 1e6 -- Pa*m^0.5
+		local FragSize    = (20 * Toughness / (Type.Density * Type.SoundSpeed * StrainRate)) ^ (2 / 3) * 100 -- cm
+		local MeanMass    = Density * math.pi * FragSize ^ 3 / 6 -- kg
 
-		if FragCount < 1 then return end -- No fragments formed
+		local MaxFrags  = math.Clamp(math.floor(Caliber * SpallFragsPerMm), 1, SpallMaxFragCount)
+		local FragCount = math.Clamp(math.ceil(Mass / MeanMass), 1, MaxFrags)
 
-		local FragMassAvg = RemovedMass / FragCount 	-- Average mass of the fragments (kg)
-		local MottMu      = FragMassAvg / 2 			-- Mott's characteristic mass; mean fragment mass = 2*mu
+		-- The core follows the residual penetrator, floored by scab speed and capped at a third of the plate's sound speed (Hazell p. 92).
+		local Loss      = HitRes.Loss
+		local CoreSpeed = math.min(ImpactSpeed * math.max((1 - Loss) ^ 0.5, SpallScabSpeed), Type.SoundSpeed / 3)
+		local Cone      = SpallMinCone + (SpallMaxCone - SpallMinCone) * Loss -- Near the limit the plate fails wide, heavy overmatch punches clean
 
-		-- Total kinetic energy budget for the spall, split per-fragment below so mass, angle and speed all vary together instead of one bulk speed for everyone.
-		local TotalFragEnergy = SpallEnergy * SpallEnergyFraction * 1000 -- kJ to J
-
-		-- Half angle of the spall cone: closer to the ballistic limit (Loss near 1) the plate barely fails and sprays debris wide, while heavy overmatch (Loss near 0) keeps debris close to the original flight direction.
-		local BaseCone = SpallMinCone + (SpallMaxCone - SpallMinCone) * HitRes.Loss
-		local FragPos = (Bullet.ConvexHit and Bullet.ConvexHit.ExitPos) or Trace.HitPos -- Spall originates at the convex the bullet exited through
+		local FragPos     = Hit.ExitPos
 		local FragDirInit = Bullet.Flight:GetNormalized()
+		local DirAngle    = FragDirInit:Angle()
+		local Right, Up   = DirAngle:Right(), DirAngle:Up()
 
-		-- Filter what the bullet has travelled through + the hit entity itself if applicable
-		local Filter = table.Copy(Bullet.Filter)
-		if Trace.Entity:IsValid() then Filter[#Filter + 1] = Trace.Entity end
+		-- Fragments skip what the round already bored through, but can still hit the rest of the struck entity, such as a liner.
+		local Entity       = Trace.Entity
+		local Filter       = {}
+		local ConvexFilter = table.Copy(Bullet.ConvexFilter or {})
+		local Bored        = ConvexFilter[Entity] or {}
 
-		-- Define a plane for the spread
-		local Right = FragDirInit:Cross(Vector(0, 0, 1)):GetNormalized()
-		local Up = FragDirInit:Cross(Right):GetNormalized()
-
-		-- Sample fragment masses from Mott's distribution (m = mu * ln(1/u)^2, decreasing in u) and reuse the same draw for this fragment's cone angle (BaseCone * u^SpallAnglePower, increasing in u), so a heavy fragment naturally pairs with a small angle and a light one with a wide angle.
-		local Masses, Weights, MassSum, WeightSum = {}, {}, 0, 0
-		for i = 1, FragCount do
-			local U = 1 - math.random()
-
-			local Mass = math.max(MottMu * math.log(1 / U) ^ 2, 1e-6)
-			Masses[i] = Mass
-			MassSum = MassSum + Mass
-
-			local Angle = BaseCone * U ^ SpallAnglePower
-			local Weight = math.cos(math.rad(Angle)) ^ SpallEnergyFalloff
-			Weights[i] = { Angle = Angle, Weight = Weight }
-			WeightSum = WeightSum + Weight
+		for _, Ent in ipairs(Bullet.Filter) do
+			if Ent ~= Entity then Filter[#Filter + 1] = Ent end
 		end
 
-		-- Rescale so the sampled masses still sum to RemovedMass, since a small sample of fragments won't average to 2*mu exactly.
-		local MassScale = RemovedMass / MassSum
+		for _, BoredHit in ipairs(ConvexHits) do
+			Bored[BoredHit.ConvexID] = true
+		end
 
-		-- Create the fragments
-		for i = 1, FragCount do
-			local FragMass   = Masses[i] * MassScale
-			local FragVolume = FragMass / Density -- cm^3, assuming the fragment has the same density as the removed material
-			local FragSize   = (6 * FragVolume / math.pi) ^ (1 / 3) -- Diameter of a sphere of that volume (cm)
+		ConvexFilter[Entity] = Bored
 
-			-- Copied from AP ammotype definition
-			local ProjArea = math.pi * (FragSize / 2) ^ 2
-			local DragCoef = ProjArea * 0.0001 / FragMass
+		-- Mott masses (m = mu * ln(1/u)^2), with the same draw setting the angle so heavy fragments fly near the axis.
+		local Draws, Masses, MassSum = {}, {}, 0
+		for I = 1, FragCount do
+			local U    = 1 - math.random()
+			local Frag = math.Clamp(MeanMass * 0.5 * math.log(1 / U) ^ 2, 1e-7, Mass)
 
-			-- This fragment's share of the total energy budget, via energy conservation (Speed = sqrt(2 * KE / Mass)), clamped to the impact speed since spall can't outrun its source.
-			local FragEnergy = TotalFragEnergy * Weights[i].Weight / WeightSum
-			local FragSpeed  = math.min((2 * FragEnergy / FragMass) ^ 0.5 * ACF.MeterToInch, Speed)
+			Draws[I], Masses[I] = U, Frag
+			MassSum = MassSum + Frag
+		end
 
-			-- Point on a circle at this fragment's sampled angle, placed at a random rotation around the cone axis
-			local SpreadRadius = math.tan(math.rad(Weights[i].Angle))
-			local SpreadAngle = math.random() * 2 * math.pi
-			local SpreadDir = Up * SpreadRadius * math.cos(SpreadAngle) + Right * SpreadRadius * math.sin(SpreadAngle)
-			local FragDir = (FragDirInit + SpreadDir):GetNormalized()
+		-- Each traced fragment stands in for Weight real ones, so the spalled mass is conserved without tracing every piece.
+		local Weight = Mass / MassSum
+
+		for I = 1, FragCount do
+			local FragMass  = Masses[I]
+			local FragSize  = (6 * FragMass / (Density * math.pi)) ^ (1 / 3) -- cm, sphere of the same mass
+			local Angle     = Cone * Draws[I] ^ SpallAnglePower
+			local Edge      = (Angle / Cone) ^ 2
+			local FragSpeed = CoreSpeed * (1 - (1 - SpallEdgeSpeed) * Edge) -- m/s
+
+			if ACF.Penetration(FragSpeed, FragMass, FragSize * 10) < SpallMinPen then continue end
+
+			local ProjArea     = math.pi * (FragSize * 0.5) ^ 2
+			local SpreadRadius = math.tan(math.rad(Angle))
+			local SpreadAngle  = math.random() * 2 * math.pi
+			local SpreadDir    = Up * SpreadRadius * math.cos(SpreadAngle) + Right * SpreadRadius * math.sin(SpreadAngle)
+			local FragDir      = (FragDirInit + SpreadDir):GetNormalized()
 
 			Ballistics.CreateFragment({
-				Diameter = FragSize,
-				Owner    = Bullet.Owner,
-				Entity   = Bullet.Entity,
-				Gun      = Bullet.Gun,
-				Pos      = FragPos,
-				ProjArea = ProjArea,
-				ProjMass = FragMass,
-				DragCoef = DragCoef,
-				Flight   = FragDir * FragSpeed,
-				Filter   = Filter,
+				Diameter     = FragSize,
+				Owner        = Bullet.Owner,
+				Entity       = Bullet.Entity,
+				Gun          = Bullet.Gun,
+				Pos          = FragPos,
+				ProjArea     = ProjArea,
+				ProjMass     = FragMass,
+				DragCoef     = ProjArea * 0.0001 / FragMass, -- Same as the AP ammo definition
+				Flight       = FragDir * (FragSpeed * ACF.MeterToInch * ACF.Scale),
+				Filter       = Filter,
+				ConvexFilter = ConvexFilter,
+				Weight       = Weight,
 			})
 		end
 	end

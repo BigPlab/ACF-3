@@ -149,6 +149,18 @@ do -- ACF global vars
 
 	ACF.PenetrationFeatherExponent = 2 -- Feathers convex health loss against how much of the plate's thickness was actually traversed
 
+	-- Composite armor interactions, see ACF.GetLayerMul; each bonus disables at 0
+	ACF.HardFaceBonus         = 0.65 -- Max fractional gain of a face harder than RHA backed by a tougher layer
+	ACF.HardFaceSpeed         = 1200 -- m/s, above this the hard face bonus fades with 1/v^2 as density overtakes strength
+	ACF.BackingToughness      = 40   -- MPa*m^0.5 of toughness over the face a backing needs to fully catch it
+	ACF.BackingRatio          = 0.5  -- Backing thickness, as a fraction of the face, needed for full support
+	ACF.InterlayerBonusKE     = 0.2  -- RHA mm per mm a fully confined soft interlayer gains against kinetic rounds
+	ACF.InterlayerBonusCE     = 0.5  -- RHA mm per mm a fully confined soft interlayer gains against jets
+	ACF.InterlayerPlateRatio  = 0.25 -- Confining plate RHAe, as a fraction of interlayer thickness, needed for full confinement
+	ACF.CompositeContactGap   = 10   -- mm, gap over which contact fades out, widened to the caliber for larger rounds
+	ACF.CompositeMinThickness = 0.25 -- Layer thickness in calibers needed to fully engage a composite effect
+	ACF.BrittleDamageLoss     = 0.3  -- Effectiveness a fully brittle layer loses at zero health, comminuted ceramic keeps ~70%
+
 	ACF.FuelRate = 15 -- Multiplier for fuel usage, 1.0 is approx real world
 	ACF.DefineSetting("FuelFactor",           1,      "Fuel rate multiplier has been set to a factor of %.2f.", ACF.FactorDataCallback("FuelRate", 0.01, 2, 2))
 

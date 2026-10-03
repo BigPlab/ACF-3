@@ -138,6 +138,9 @@ if CLIENT then
 		local MatKinetic  = Base:AddLabel()
 		local MatChemical = Base:AddLabel()
 		local MatSpall    = Base:AddLabel()
+		local MatHardness = Base:AddLabel()
+		local MatTough    = Base:AddLabel()
+		local MatImped    = Base:AddLabel()
 		local MatCost     = Base:AddLabel()
 
 		local StatsGraphBase = Base:AddCollapsible("Stats Graph", false)
@@ -159,6 +162,9 @@ if CLIENT then
 			MatKinetic:SetText(string.format("Kinetic Multiplier: %gx", Data.KineticMul))
 			MatChemical:SetText(string.format("Chemical Multiplier: %gx", Data.ChemicalMul))
 			MatSpall:SetText(string.format("Spall Multiplier: %gx", Data.SpallMul))
+			MatHardness:SetText(string.format("Hardness: %gx RHA", Data.Hardness))
+			MatTough:SetText(string.format("Toughness: %g MPa*m^0.5", Data.Toughness))
+			MatImped:SetText(string.format("Impedance: %.1f MPa*s/m", Data.Density * Data.SoundSpeed * 1e-6))
 			MatCost:SetText(string.format("Cost: %g points/m^3", Data.CostMul))
 
 			RunConsoleCommand("acfarmormesh_material", Data.ID)

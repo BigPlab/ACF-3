@@ -40,13 +40,14 @@ local function GetArmorLayers(StartTrace, Dir, Filter)
 
 		local Convex = Hit.Entity.ACF_Volumetric_Mesh.Convexes[Hit.ConvexID]
 
+		-- Composite effects included at full engagement, since no particular round is known here.
 		table.insert(Layers, {
 			Terminal = false,
 			Entity   = Hit.Entity,
 			Material = Convex.Material,
 			GeoThick = Hit.GeoThick,
-			EffKE    = Hit.GeoThick * Hit.ArmorType.KineticMul,
-			EffCE    = Hit.GeoThick * Hit.ArmorType.ChemicalMul,
+			EffKE    = Hit.GeoThick * ACF.GetLayerMul(Hit, false),
+			EffCE    = Hit.GeoThick * ACF.GetLayerMul(Hit, true),
 		})
 	end
 

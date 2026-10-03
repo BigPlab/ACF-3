@@ -90,16 +90,19 @@ function Damage.getBulletDamage(Bullet, Trace)
 	if ACF.Check(Entity) then
 		local NormDir    = Bullet.Flight:GetNormalized()
 		local AmmoType   = ACF.Classes.GetSubtypeByName("ACF.Ammunition.BaseAmmo", Bullet.AmmoType)
-		local MulField   = (AmmoType and AmmoType.IsChemical) and "ChemicalMul" or "KineticMul"
+		local Chemical   = AmmoType and AmmoType.IsChemical or false
 
 		-- The ballistics layer resolves the impact to a single convex (Bullet.ConvexHit) so each convex
-		-- is damaged as its own event. Older/meshless callers (blasts) fall back to summing every live convex.
+		-- is damaged as its own event. Jets bring their own cross-entity hits, other callers sum every live convex.
 		local ConvexHit  = Bullet.ConvexHit
 		if ConvexHit and ConvexHit.Entity ~= Entity then ConvexHit = nil end -- Stale entry-hole hit from a different entity/convex
-		local ConvexHits = ConvexHit and { ConvexHit } or ACF.GetConvexHits(Entity, Trace.HitPos, NormDir)
+		local ConvexHits = ConvexHit and { ConvexHit } or (Bullet.EntityHits and Bullet.EntityHits[Entity]) or ACF.GetConvexHits(Entity, Trace.HitPos, NormDir)
 
 		local Penetration = Bullet:GetPenetration()
 		local Area        = Bullet.DamageArea or Bullet.ProjArea -- HEAT bores its channel with the jet, which is far narrower than the shell that carried it
+		local Weight      = Bullet.DamageWeight or 1 -- A spall fragment stands in for this many real ones
+		local Caliber     = (Area / math.pi) ^ 0.5 * 20 -- mm, diameter of the bore
+		local Speed       = Bullet.Flight:Length() / ACF.Scale * ACF.InchToMeter -- m/s
 		local Thickness, Angle
 		local HitPos = Trace.HitPos
 		if #ConvexHits > 0 then
@@ -111,13 +114,13 @@ function Damage.getBulletDamage(Bullet, Trace)
 			local Budget = Penetration
 			local Hits   = {}
 			for _, Hit in ipairs(ConvexHits) do
-				local Effective = Hit.GeoThick * Hit.ArmorType[MulField] -- Effective armor (RHA mm) this convex presents along the path
+				local Effective = Hit.GeoThick * ACF.GetLayerMul(Hit, Chemical, Caliber, Speed) -- Effective armor (RHA mm) this convex presents, composite effects included
 				local Consumed  = math.min(Effective, Budget) -- Effective armor actually defeated before the round stalls
 				local Frac      = Effective > 0 and (Consumed / Effective) or 0 -- Fraction of this convex's geometric thickness traversed
 
 				Thickness = Thickness + Effective
 				Budget    = Budget - Consumed
-				Hits[#Hits + 1] = { ConvexID = Hit.ConvexID, Volume = Hit.GeoThick * Frac * 0.1 * Area / ACF.InchToCmCu, Frac = Frac } -- (mm)(mm to cm)(cm^2) = cm^3, then cm^3 to in^3
+				Hits[#Hits + 1] = { ConvexID = Hit.ConvexID, Volume = Hit.GeoThick * Frac * 0.1 * Area * Weight / ACF.InchToCmCu, Frac = Frac, Source = Hit } -- (mm)(mm to cm)(cm^2) = cm^3, then cm^3 to in^3
 			end
 
 			Angle = 0 -- GeoThick already accounts for obliquity
@@ -129,7 +132,7 @@ function Damage.getBulletDamage(Bullet, Trace)
 			Angle     = ACF.GetHitAngle(Trace, Bullet.Flight)
 		end
 
-		DmgResult:SetArea(Area)
+		DmgResult:SetArea(Area * Weight)
 		DmgResult:SetPenetration(Penetration)
 		DmgResult:SetThickness(Thickness)
 		DmgResult:SetAngle(Angle)

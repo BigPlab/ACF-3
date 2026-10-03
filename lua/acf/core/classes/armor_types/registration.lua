@@ -11,6 +11,9 @@ local Entries    = Classes.GetOrCreateEntries(ArmorTypes)
 -- tracks the order types were registered in, so callers that want definition order can sort by it.
 local RegisterCount = 0
 
+-- Interaction properties a type may leave unset, steel-like so older or third party types stay neutral.
+local Defaults = { Hardness = 1, Toughness = 40, SoundSpeed = 4570 }
+
 --- Registers an armor type.
 --- Armor types stay keyed by a plain ID rather than a fully qualified class name, because that ID is
 --- what a convex stores as its material and what gets networked, so it has to survive serialization.
@@ -43,6 +46,10 @@ function ArmorTypes.Register(ID, Base)
 	-- Callers define OnLoaded on the returned table, so it cannot be run until this returns.
 	timer.Simple(0, function()
 		if Class.OnLoaded then Class:OnLoaded() end
+
+		for Key, Value in pairs(Defaults) do
+			if Class[Key] == nil then Class[Key] = Value end
+		end
 
 		hook.Run("ACF_OnLoadClass", ID, Class)
 

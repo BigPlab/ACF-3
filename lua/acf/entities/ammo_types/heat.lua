@@ -298,6 +298,9 @@ Classes.DefineClass("ACF.Ammunition.HEAT", "ACF.Ammunition.AP", function(CLASS, 
 			local JetMassPct   = 1
 
 			Bullet.DamageArea = Bullet.JetArea -- Everything past this point is bored by the jet, not by the shell
+			Bullet.EntityHits = Ballistics.GetEntityHits(Bullet, JetStart, JetEnd) -- One stack for the whole line, so layers see neighbors in other entities
+
+			local JetCaliber = (Bullet.JetArea / math.pi) ^ 0.5 * 20 -- mm, matches the bore getBulletDamage uses
 			-- Main jet penetrations
 			while Penetrations < 20 do
 				local TraceRes  = ACF.trace(TraceData)
@@ -312,7 +315,8 @@ Classes.DefineClass("ACF.Ammunition.HEAT", "ACF.Ammunition.AP", function(CLASS, 
 
 				-- Get the (full jet's) penetration. Floor Standoff so a dead convex's still-solid collision, hit again at ~0 distance, can't zero out GetPenetration and abort the whole jet.
 				local Standoff    = math.max((PenHitPos - JetStart):Length() * ACF.InchToMeter, 0.01)
-				local Penetration = self:GetPenetration(Bullet, Standoff) * math.max(0, JetMassPct)
+				local FullPen     = self:GetPenetration(Bullet, Standoff)
+				local Penetration = FullPen * math.max(0, JetMassPct)
 				-- If it's out of range, stop here
 				if Penetration == 0 then break end
 
@@ -336,12 +340,12 @@ Classes.DefineClass("ACF.Ammunition.HEAT", "ACF.Ammunition.AP", function(CLASS, 
 					-- TODO: Fix world entity penetration
 					--BaseArmor = Penetration + 1
 				elseif TraceRes.Hit then
-					ConvexHits = ACF.GetConvexHits(Ent, PenHitPos, Direction)
+					ConvexHits = Bullet.EntityHits[Ent] or ACF.GetConvexHits(Ent, PenHitPos, Direction)
 
 					if #ConvexHits > 0 then
 						BaseArmor = 0
 						for _, Hit in ipairs(ConvexHits) do
-							BaseArmor = BaseArmor + Hit.GeoThick * Hit.ArmorType.ChemicalMul
+							BaseArmor = BaseArmor + Hit.GeoThick * ACF.GetLayerMul(Hit, true, JetCaliber)
 						end
 					else
 						BaseArmor = Ent.GetArmor and Ent:GetArmor(TraceRes) or 0
@@ -362,8 +366,8 @@ Classes.DefineClass("ACF.Ammunition.HEAT", "ACF.Ammunition.AP", function(CLASS, 
 				end
 				EffectiveArmor = math.max(EffectiveArmor, 0.01) -- Prevent divide by zero and nan armor
 
-				-- Percentage of total jet mass lost to this penetration
-				local LostMassPct =  EffectiveArmor / Penetration
+				-- Percentage of total jet mass lost to this penetration, against the full jet so layering stays neutral
+				local LostMassPct = EffectiveArmor / FullPen
 				if DamageDealt == 0 then
 					-- Each jet layer resolves its own convex chain above, so clear any stale entry convex from the original impact and let getBulletDamage re-derive it here.
 					Bullet.ConvexHit = nil

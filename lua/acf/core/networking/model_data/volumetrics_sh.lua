@@ -541,11 +541,29 @@ function ACF.ResolveConvexStack(Intersections, Direction, ClosestOnly)
     end
 
     if ClosestOnly then return nil end
+
+    -- Each hit records the layers touching it as flat fields, so composite rules can read neighbors without cyclic links.
+    for Index, Hit in ipairs(Hits) do
+        local Front, Back = Hits[Index - 1], Hits[Index + 1]
+
+        if Front then
+            Hit.FrontType  = Front.ArmorType
+            Hit.FrontThick = Front.GeoThick
+            Hit.FrontGap   = Front.ExitPos:Distance(Hit.EntryPos) * 25.4 -- mm
+        end
+
+        if Back then
+            Hit.BackType  = Back.ArmorType
+            Hit.BackThick = Back.GeoThick
+            Hit.BackGap   = Hit.ExitPos:Distance(Back.EntryPos) * 25.4 -- mm
+        end
+    end
+
     return Hits
 end
 
 -- Every convex entry/exit pair the ray passes through a single entity's mesh, in order (see
--- ACF.ResolveConvexStack). GeoThick is in mm; multiply by ArmorType.KineticMul/.ChemicalMul as needed.
+-- ACF.ResolveConvexStack). GeoThick is in mm; multiply by ACF.GetLayerMul for RHA equivalent.
 -- Filter (optional) is a per-entity set { [ConvexID] = true } of convexes to treat as transparent.
 function ACF.GetConvexHits(Entity, HitPos, Direction, IncludeDead, IncludeDefault, Filter)
     if not Entity.ACF_Volumetric_Mesh then return {} end
@@ -565,6 +583,84 @@ function ACF.GetConvexHit(Entity, HitPos, Direction, IncludeDead, IncludeDefault
     local Hits  = ACF.RayIntersectMesh(Entity, Start, Direction, IncludeDead, IncludeDefault, Filter)
 
     return ACF.ResolveConvexStack(Hits, Direction, true)
+end
+
+do -- Composite armor interactions --------------------------
+    local min, max, log, tanh = math.min, math.max, math.log, math.tanh
+
+    -- 1 in contact, fading to 0 once the gap reaches Reach mm; a missing neighbor never touches.
+    local function Contact(Gap, Reach)
+        return Gap and max(0, 1 - Gap / Reach) or 0
+    end
+
+    -- Stress reflection coefficient for a wave in A meeting B (Hazell Eq. 5.25), positive when B has lower impedance.
+    function ACF.GetReflection(TypeA, TypeB)
+        local ZA = TypeA.Density * TypeA.SoundSpeed
+        local ZB = TypeB.Density * TypeB.SoundSpeed
+
+        return (ZA - ZB) / (ZA + ZB)
+    end
+
+    -- RHA multiplier of a stacked hit with its neighbors' composite effects and its own damage applied.
+    -- Caliber (mm) and Speed (m/s) are optional, leaving them out assumes full engagement (armor tools).
+    function ACF.GetLayerMul(Hit, Chemical, Caliber, Speed)
+        local Type   = Hit.ArmorType
+        local Mul    = Chemical and Type.ChemicalMul or Type.KineticMul
+        local Thick  = Hit.GeoThick
+        local Reach  = max(Caliber or 0, ACF.CompositeContactGap)
+        local Engage = Caliber and min(1, Thick / (ACF.CompositeMinThickness * Caliber)) or 1
+
+        local FrontType = Hit.FrontType
+        local BackType  = Hit.BackType
+
+        -- Hard face: harder than RHA it shatters and erodes the penetrator, a tougher layer behind catches the debris cone.
+        if not Chemical and BackType and Type.Hardness > 1 then
+            local Face    = tanh(2 * log(Type.Hardness))
+            local Backing = min(1, max(0, (BackType.Toughness - Type.Toughness) / ACF.BackingToughness))
+            local Support = min(1, Hit.BackThick / (ACF.BackingRatio * Thick))
+            local Fade    = Speed and min(1, (ACF.HardFaceSpeed / max(Speed, 1)) ^ 2) or 1
+
+            Mul = Mul * (1 + ACF.HardFaceBonus * Face * Backing * Support * Contact(Hit.BackGap, Reach) * Engage * Fade)
+        end
+
+        -- Confined interlayer: shock reflecting off stiffer plates on both sides drives them and the filler into the penetrator.
+        if FrontType and BackType then
+            local Confine = min(ACF.GetReflection(FrontType, Type), ACF.GetReflection(BackType, Type))
+
+            if Confine > 0 then
+                local Plates  = min(Hit.FrontThick * FrontType.KineticMul, Hit.BackThick * BackType.KineticMul)
+                local Support = min(1, Plates / (ACF.InterlayerPlateRatio * Thick))
+                local Bonus   = Chemical and ACF.InterlayerBonusCE or ACF.InterlayerBonusKE
+
+                Mul = Mul + Bonus * Confine * Support * Contact(Hit.FrontGap, Reach) * Contact(Hit.BackGap, Reach) * Engage
+            end
+        end
+
+        -- Brittle damage: cracked brittle material keeps only part of its resistance, ductile material is unaffected.
+        local Entity   = Hit.Entity
+        local MeshData = IsValid(Entity) and Entity.ACF_Volumetric_Mesh
+        local Convex   = MeshData and MeshData.Convexes[Hit.ConvexID]
+
+        if Convex and Convex.MaxHealth > 0 then
+            local Brittle = 1 - min(1, Type.Toughness / ACF.BackingToughness)
+            local Damage  = 1 - Convex.Health / Convex.MaxHealth
+
+            Mul = Mul * (1 - ACF.BrittleDamageLoss * Brittle * Damage)
+        end
+
+        return Mul
+    end
+
+    -- Fraction of a layer's rear stress that releases as tension and spalls: all of it into air, none into a stiffer layer it touches.
+    function ACF.GetSpallRelease(Hit, Caliber)
+        local BackType = Hit.BackType
+        if not BackType then return 1 end
+
+        local Touch   = Contact(Hit.BackGap, max(Caliber or 0, ACF.CompositeContactGap))
+        local Reflect = max(0, ACF.GetReflection(Hit.ArmorType, BackType))
+
+        return 1 - Touch * (1 - Reflect)
+    end
 end
 
 -- Returns an entity's total health and max health. ACF entities track this directly on their ACF table (damage is
@@ -614,7 +710,7 @@ local function TestTrace( ply )
         debugoverlay.Line(Hit.EntryPos, Hit.ExitPos, 10, Col, true)
         debugoverlay.EntityTextAtPosition((Hit.EntryPos + Hit.ExitPos) / 2, 0, Hit.ArmorType.Name, 10, Col)
         debugoverlay.EntityTextAtPosition((Hit.EntryPos + Hit.ExitPos) / 2, 1, "CID: " .. Hit.ConvexID, 10, Col)
-        debugoverlay.EntityTextAtPosition((Hit.EntryPos + Hit.ExitPos) / 2, 2, "RHAe: " .. math.Round(Hit.GeoThick * Hit.ArmorType.KineticMul), 10, Col)
+        debugoverlay.EntityTextAtPosition((Hit.EntryPos + Hit.ExitPos) / 2, 2, "RHAe: " .. math.Round(Hit.GeoThick * ACF.GetLayerMul(Hit, false)), 10, Col)
     end
 end
 

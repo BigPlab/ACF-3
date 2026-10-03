@@ -282,7 +282,8 @@ Classes.DefineClass("ACF.Ammunition.AP", "ACF.Ammunition.BaseAmmo", function(CLA
 				if Overkill > 0 then
 					table.insert(Filter, Target) -- "Penetrate" (Ignoring the prop for the retry trace)
 
-					Bullet.Flight = Bullet.Flight:GetNormalized() * (Energy.Kinetic * (1 - HitRes.Loss) * 2000 / Bullet.ProjMass) ^ 0.5 * ACF.MeterToInch
+					-- Penetration is spent linearly, so splitting a plate into layers neither helps nor hurts on its own
+					Bullet.Flight = Bullet.Flight:GetNormalized() * self:CalcSpeed(Bullet, Overkill) * ACF.MeterToInch * ACF.Scale
 
 					return "Penetrated"
 				elseif HitRes.Ricochet then

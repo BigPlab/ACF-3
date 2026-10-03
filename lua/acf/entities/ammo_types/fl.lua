@@ -35,6 +35,11 @@ Classes.DefineClass("ACF.Ammunition.FL", "ACF.Ammunition.AP", function(CLASS, BA
 		return ACF.Penetration(Speed, Bullet.FlechetteMass, Bullet.FlechetteCaliber * 10)
 	end
 
+	--- Inverse of GetPenetration, so a flechette keeps its own mass and caliber after each layer.
+	function CLASS:CalcSpeed(Bullet, Penetration)
+		return ACF.CalcSpeed(Penetration, Bullet.FlechetteMass, Bullet.FlechetteCaliber * 10)
+	end
+
 	function CLASS:GetDisplayData(Data)
 		local Display = {
 			MaxPen = self:GetPenetration(Data, Data.MuzzleVel)

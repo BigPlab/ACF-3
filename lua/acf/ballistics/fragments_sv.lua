@@ -8,24 +8,27 @@ local MinSpeed        = 50 -- m/s, below this a fragment is assumed spent
 local MaxRange        = 8000 -- Trace length used to find a fragment's next obstacle, in world units
 
 --- A straight-line, non-ricocheting projectile resolved in one closed-form pass instead of per-tick iteration.
---- Data: Pos, Flight (world units/s), ProjMass, ProjArea, Diameter, DragCoef, Owner, Gun, Entity, Filter.
+--- Data: Pos, Flight (world units/s), ProjMass, ProjArea, Diameter, DragCoef, Owner, Gun, Entity, Filter,
+--- ConvexFilter (optional, convexes already bored), Weight (optional, real fragments this one stands for).
 function Ballistics.CreateFragment(Data)
 	local Ammo = Classes.GetSubtypeByName("ACF.Ammunition.BaseAmmo", "ACF.Ammunition.AP")
 
 	local Fragment = {
-		AmmoType = "ACF.Ammunition.AP",
-		Owner    = Data.Owner,
-		Gun      = Data.Gun,
-		Entity   = Data.Entity,
-		Pos      = Data.Pos,
-		ProjMass = Data.ProjMass,
-		ProjArea = Data.ProjArea,
-		Diameter = Data.Diameter,
-		DragCoef = Data.DragCoef,
-		Filter   = table.Copy(Data.Filter or {}),
-		Color    = ColorRand(100, 255),
-		IsSpall  = true,
-		Mode     = "Flight", -- Flight looks ahead with a trace, Penetration walks a frozen ray through armor
+		AmmoType     = "ACF.Ammunition.AP",
+		Owner        = Data.Owner,
+		Gun          = Data.Gun,
+		Entity       = Data.Entity,
+		Pos          = Data.Pos,
+		ProjMass     = Data.ProjMass,
+		ProjArea     = Data.ProjArea,
+		Diameter     = Data.Diameter,
+		DragCoef     = Data.DragCoef,
+		Filter       = table.Copy(Data.Filter or {}),
+		ConvexFilter = table.Copy(Data.ConvexFilter or {}), -- Per fragment, so one sibling's penetrations never filter another's
+		DamageWeight = Data.Weight or 1, -- Scales damage and bored volume, never penetration
+		Color        = ColorRand(100, 255),
+		IsSpall      = true,
+		Mode         = "Flight", -- Flight looks ahead with a trace, Penetration walks a frozen ray through armor
 	}
 
 	function Fragment:GetPenetration(Speed)
