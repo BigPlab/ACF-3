@@ -72,7 +72,6 @@ local function DimToModel(x, y, z)
 end
 
 --- Returns the entities a conversion of Target removes and pastes back, by EntIndex.
---- Fails unless Player owns every one of them. The paste makes them all Player's.
 function ACF.GetConversionEntities(Target)
     local EntsByIndex = {}
     local Contraption = Target:CFW_GetContraption()
@@ -108,7 +107,7 @@ function ACF.ConvertBaseplate(Player, Target)
     local AMi, AMa = PhysObj:GetAABB()
     local BoxSize = AMa - AMi
 
-    local EntsByIndex, Error = ACF.GetConversionEntities(Player, Target)
+    local EntsByIndex, Error = ACF.GetConversionEntities(Target)
     if not EntsByIndex then return false, Error end
 
     -- Perform the area copy and retrieve the dupe table
