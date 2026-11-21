@@ -579,6 +579,16 @@ do -- Native type verification functions
 	end
 end
 
+do -- Numerical validation functions
+	function ACF.IsNumberFinite(Value)
+		return Value == Value and Value ~= math.huge and Value ~= -math.huge
+	end
+
+	function ACF.IsNumberNaN(Value)
+		return Value ~= Value
+	end
+end
+
 do -- Hitbox storing and retrieval functions
 	ACF.Hitboxes = ACF.Hitboxes or {}
 
@@ -1191,7 +1201,7 @@ do -- Crew related
 	function ACF.FindLongestBullet(Gun)
 		local LongestLength = 0
 		local LongestBullet = nil
-		for Crate in pairs(Gun.Crates) do
+		for Crate in pairs(Gun:ACF_GetUserVar("Crates") or {}) do
 			local BulletData = Crate.BulletData
 			local Length = BulletData.RoundLength or (BulletData.PropLength + BulletData.ProjLength)
 			if Length > LongestLength then
